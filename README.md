@@ -122,7 +122,7 @@ the RS-485 bus quiet. Writes go straight to the controller, then refresh that ro
 ```
 GET http://wavin.local/health
 → {"status":"ok","serial":"up","rooms":10,"lastPollMs":4210,"uptimeS":3600,
-   "ip":"192.168.0.42","rssi":-58,"modbusOk":420,"modbusErr":3}
+   "ip":"192.168.0.42","rssi":-58,"modbusOk":420,"modbusErr":3,"chipTemp":48.3}
 
 GET http://wavin.local/rooms
 → [ {"id":1,"syncGroup":3,"current":22.4,"desired":21.0,"manual":21.0,"floor":23.1,

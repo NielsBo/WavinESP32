@@ -37,7 +37,7 @@ so the response reflects real state, not an echo of your request.
 ```json
 { "status": "ok", "serial": "up", "rooms": 10, "lastPollMs": 4210,
   "uptimeS": 3600, "ip": "192.168.0.42", "rssi": -58,
-  "modbusOk": 420, "modbusErr": 3, "relayOverride": false }
+  "modbusOk": 420, "modbusErr": 3, "relayOverride": false, "chipTemp": 48.3 }
 ```
 
 | Field | Use |
@@ -47,6 +47,7 @@ so the response reflects real state, not an echo of your request.
 | `lastPollMs` | age of the last completed sweep, ms |
 | `modbusOk` / `modbusErr` | cumulative counters; a climbing `modbusErr` means bus trouble |
 | `relayOverride` | **true if a relay is currently suppressed** — see §4 |
+| `chipTemp` | ESP32 **die** temperature °C, or `null` if the chip has no sensor. Not room temperature — it runs well above ambient. Useful only as a trend (enclosure overheating) |
 
 Poll this on your own schedule. Treat `serial: "down"` as *"all room data is stale, do not act on
 it"*.

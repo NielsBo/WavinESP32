@@ -52,6 +52,21 @@ static void roomToJson(const Room *r, JsonObject o) {
   o["cooling"]    = (r->config & PD_CFG_COOL) != 0;
 }
 
+// ESP32 die temperature, degC, or NAN when the chip has no usable sensor.
+// Core 3.x exposes temperatureRead() on every target; on the classic ESP32
+// under core 1.x/2.x only the (misspelled) ROM function exists, and it returns
+// Fahrenheit, with 128 meaning "no sensor" (ESP32 rev 0 silicon).
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
+static float chipTempC() { return temperatureRead(); }
+#else
+extern "C" uint8_t temprature_sens_read();
+static float chipTempC() {
+  uint8_t raw = temprature_sens_read();
+  if (raw == 128) return NAN;
+  return ((float)raw - 32.0f) / 1.8f;
+}
+#endif
+
 static void handleHealth() {
   JSON_DOC(doc, 384);
   bool link = wavinLinkUp();
@@ -65,6 +80,7 @@ static void handleHealth() {
   doc["modbusOk"]   = wavinOk();
   doc["modbusErr"]  = wavinErrors();
   doc["relayOverride"] = anyRelayOverridden();
+  addFloat(doc.as<JsonObject>(), "chipTemp", chipTempC());
   String out;
   serializeJson(doc, out);
   server.send(200, "application/json", out);
