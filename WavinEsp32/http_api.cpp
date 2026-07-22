@@ -131,7 +131,13 @@ static void handleNotFound() {
         sendRoom(roomById(id));
         return;
       }
-      sendError(400, "bad_request", "expected manualTemp or mode");
+      if (!body["cooling"].isNull()) {
+        bool on = body["cooling"].as<bool>();
+        if (!setRoomCooling(id, on)) { sendError(409, "busy", "modbus write failed"); return; }
+        sendRoom(roomById(id));
+        return;
+      }
+      sendError(400, "bad_request", "expected manualTemp, mode or cooling");
       return;
     }
   }

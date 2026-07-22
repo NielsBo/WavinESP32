@@ -122,4 +122,9 @@ uint32_t     lastPollAt();                // millis() when the last sweep comple
 bool setRoomManualTemp(int id, float celsius);      // clamped 0..30
 bool setRoomMode(int id, const char *mode);         // "manual" | "standby" | "eco" | "comfort"
 
+// COOL MODE inverts the channel's control loop: the actuator opens when the
+// room is ABOVE setpoint instead of below. Per room, written with a masked
+// write so mode/lock/floor bits are preserved.
+bool setRoomCooling(int id, bool on);
+
 const char* modeName(uint16_t config);

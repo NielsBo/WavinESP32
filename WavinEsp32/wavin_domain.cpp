@@ -231,3 +231,17 @@ bool setRoomMode(int id, const char *mode) {
   refreshRoom(id);
   return true;
 }
+
+bool setRoomCooling(int id, bool on) {
+  const Room *r = roomById(id);
+  if (!r) return false;
+
+  uint16_t data = on ? PD_CFG_COOL : 0x0000;
+  // Clear only bit 13 in the mask, so COOL MODE is the single bit written and
+  // the room's mode / locks / floor settings survive untouched.
+  if (!wavinWriteIndexMasked(CAT_PACKED, PD_CONFIG, (uint8_t)r->syncGroup,
+                             data, (uint16_t)~PD_CFG_COOL))
+    return false;
+  refreshRoom(id);
+  return true;
+}

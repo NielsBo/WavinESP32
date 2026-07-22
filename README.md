@@ -52,7 +52,7 @@ short bus, but it is **out of spec** — fine as a quick test, not for the final
 | `RO` / `TXD` | **GPIO16** (RX2) | ESP receives ← bus |
 | `DI` / `RXD` | **GPIO17** (TX2) | ESP transmits → bus |
 | `DE` + `RE` *(manual modules only)* | **GPIO4** | direction; omit on auto-direction modules |
-| `VCC` | **3V3** | never 5V |
+| `VCC` | **3V3** *or* **5V** | see the power section above — a genuine MAX485 needs 5V **plus a divider on `RO`** |
 | `GND` | GND | common ground with the bus |
 | `A` / `B` | AHC9000 A / B | differential pair |
 
@@ -98,12 +98,14 @@ All in `WavinEsp32/config.h`:
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `AUTO_DIRECTION` | `1` | 1 = auto module (no DE pin), 0 = manual DE/RE on `DE_PIN` |
+| `AUTO_DIRECTION` | `0` | 0 = manual DE/RE on `DE_PIN`, 1 = auto module (no DE pin) |
 | `DE_PIN` / `RXD2` / `TXD2` | 4 / 16 / 17 | RS-485 pins |
 | `WAVIN_SERIAL_CFG` | `SERIAL_8N1` | **OEM spec is 8N1**; try `SERIAL_8N2` only if reads fail |
+| `RESPONSE_TIMEOUT` | `300` | ms; also the worst-case time one failed read can block `loop()` |
 | `UNIT_ID` | `1` | every AHC9000 answers at logical address 1 |
 | `ELEMENT_COUNT` | `10` | how many element pages to scan (max 48) |
-| `POLL_INTERVAL_MS` | `30000` | poll cadence |
+| `POLL_INTERVAL_MS` | `30000` | time for one **full sweep**; one element is polled every `POLL_INTERVAL_MS / ELEMENT_COUNT` |
+| `FAIL_THRESHOLD` / `FAIL_BACKOFF_MS` | 3 / 5 min | park an element after N consecutive failures |
 | `MDNS_NAME` | `wavin` | → `http://wavin.local` |
 | `LED_PIN` / `LED_ACTIVE_HIGH` | 2 / 1 | status LED; set 0 for active-low boards |
 | `MODBUS_OK_TIMEOUT_MS` | 2×poll+15s | how long without a good read before "link down" |
@@ -140,7 +142,16 @@ curl -X POST http://wavin.local/rooms/1 \
      -H "X-Api-Token: your-token" \
      -H "Content-Type: application/json" \
      -d '{"mode":"manual"}'      # manual | standby | eco | comfort | schedule
+
+curl -X POST http://wavin.local/rooms/1 \
+     -H "X-Api-Token: your-token" \
+     -H "Content-Type: application/json" \
+     -d '{"cooling":true}'       # invert the control loop for this room
 ```
+
+**`cooling`** sets the room's `COOL MODE` bit, which **inverts the control loop**: the actuator
+opens when the room is *above* setpoint instead of below. Written with a masked write, so the
+room's mode, lock and floor settings are preserved. See [Heat redistribution](#8-heat-redistribution).
 
 > **`Content-Type: application/json` is required.** The ESP32 `WebServer` parses
 > `application/x-www-form-urlencoded` bodies into form args instead of exposing the raw JSON, so
@@ -191,3 +202,30 @@ schedule, high-temp cutoff, per-room floor limits / alarms / hysteresis, cooling
 pump control, per-channel and total power, week schedules, change-flag polling and thermostat
 pairing. All of it is documented in [docs/WAVIN_REGISTER_MAP.md](docs/WAVIN_REGISTER_MAP.md); the
 `wavin_modbus` layer can already read and write any of it.
+
+## 8. Heat redistribution
+
+`COOL MODE` can be used to move heat between rooms rather than to cool the house: put an
+over-warm room (solar gain, wood stove, south-facing) into cooling so its loop *absorbs* heat into
+the circulating water, and leave the cold rooms in normal heating so they *release* it. The floor
+slab becomes a heat exchanger and the manifold the transfer bus.
+
+**The one condition that decides whether it works:** heat only flows into the water if the water is
+**cooler than the warm room**. So:
+
+- The **circulation pump must run** (otherwise nothing moves).
+- The **heat source must be off**, or supplying water below the warm room's temperature. If the
+  heat pump is pushing 30 °C water while the warm room is 24 °C, opening that room's valve in
+  cooling mode *heats it further* - the exact opposite of the intent.
+
+In other words this is a **pump-on / heat-off** mode. Practically: when you detect
+`room A > target` and `room B < target`, set A to `cooling:true`, ensure B is heating, and make
+sure the heat source is paused while the pump circulates. Reverse A back to `cooling:false`
+afterwards.
+
+Condensation is **not** a concern here (unlike real cooling with chilled water) because the
+circulating water sits at room temperature. The elements still report `dewPoint` and `humidity` if
+you ever want to guard against it.
+
+Expect modest, slow transfer - it is limited by loop length, flow rate and the small temperature
+difference between rooms. Treat it as gentle evening-out, not as room-to-room air conditioning.
