@@ -20,8 +20,8 @@
 #include "http_api.h"
 #include "status_led.h"
 
-static uint32_t lastPoll        = 0;
 static uint32_t lastWifiAttempt = 0;
+static uint32_t lastLoggedSweep = 0;
 
 static void wifiConnect() {
   WiFi.mode(WIFI_STA);
@@ -89,11 +89,14 @@ void loop() {
     WiFi.begin(WIFI_SSID, WIFI_PASS);
   }
 
-  if (millis() - lastPoll >= POLL_INTERVAL_MS) {
-    lastPoll = millis();
-    int n = pollAllRooms();
-    Serial.printf("[poll] %d room(s)  ok=%lu err=%lu\n",
-                  n, (unsigned long)wavinOk(), (unsigned long)wavinErrors());
+  // Incremental: at most one element per pass, so a dead bus cannot stall HTTP.
+  pollStep();
+
+  // Log once per completed sweep rather than once per element.
+  if (lastPollAt() != lastLoggedSweep) {
+    lastLoggedSweep = lastPollAt();
+    Serial.printf("[sweep] %d room(s)  ok=%lu err=%lu\n",
+                  roomCount(), (unsigned long)wavinOk(), (unsigned long)wavinErrors());
     for (int i = 0; i < roomCount(); i++) {
       const Room *r = roomAt(i);
       Serial.printf("  room %d (sync %d): %.1fC -> %.1fC  %s  %s\n",

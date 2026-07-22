@@ -104,13 +104,19 @@ struct Room {
 
 void  wavinDomainBegin();
 
-// Polls all elements and refreshes the room cache. Returns rooms found.
+// Blocking sweep of every element. Used once at boot so the API has data
+// immediately. Returns the number of rooms found.
 int   pollAllRooms();
+
+// Incremental poll: advances at most one element per call, and only every
+// POLL_STEP_MS. Call this from loop() - it never blocks for more than a single
+// Modbus transaction, and skips elements that are backing off.
+void  pollStep();
 
 int          roomCount();                 // number of valid rooms in the cache
 const Room*  roomAt(int idx);             // 0..roomCount()-1
 const Room*  roomById(int id);            // nullptr if unknown
-uint32_t     lastPollAt();                // millis() of last successful poll
+uint32_t     lastPollAt();                // millis() when the last sweep completed
 
 // Control. Both re-read the room afterwards so the cache reflects reality.
 bool setRoomManualTemp(int id, float celsius);      // clamped 0..30

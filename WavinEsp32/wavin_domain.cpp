@@ -1,9 +1,18 @@
 #include "wavin_domain.h"
 #include "wavin_modbus.h"
 
-static Room     s_rooms[MAX_ROOMS];
-static int      s_count = 0;
-static uint32_t s_lastPoll = 0;
+// One slot per element index. Slots are updated in place by the incremental
+// poller, so HTTP reads always see a complete (if slightly stale) record.
+struct ElementSlot {
+  Room     room;
+  uint8_t  failCount;
+  uint32_t nextTryAt;   // millis(); 0 = eligible now
+};
+
+static ElementSlot s_slots[ELEMENT_COUNT];
+static int         s_cursor    = 0;   // which element the next step examines
+static uint32_t    s_lastStep  = 0;
+static uint32_t    s_lastSweep = 0;
 
 // ---------------------------------------------------------------------------
 // Value decoding (docs/WAVIN_REGISTER_MAP.md section 2)
@@ -51,8 +60,12 @@ const char* modeName(uint16_t config) {
 }
 
 void wavinDomainBegin() {
-  for (int i = 0; i < MAX_ROOMS; i++) s_rooms[i].valid = false;
-  s_count = 0;
+  for (int i = 0; i < ELEMENT_COUNT; i++) {
+    s_slots[i].room.valid = false;
+    s_slots[i].failCount  = 0;
+    s_slots[i].nextTryAt  = 0;
+  }
+  s_cursor = 0;
 }
 
 // Reads one element + its room page into `r`. Returns false if there is no
@@ -101,41 +114,86 @@ static bool readRoom(int elementIndex, Room &r) {
   return true;
 }
 
+// Applies the outcome of one element read to its slot (shared by the blocking
+// sweep and the incremental poller).
+static bool updateSlot(int e) {
+  ElementSlot &s = s_slots[e];
+  Room r;
+  if (readRoom(e, r)) {
+    s.room      = r;                 // r.valid was set by readRoom()
+    s.failCount = 0;
+    s.nextTryAt = 0;
+    return true;
+  }
+  if (s.failCount < 255) s.failCount++;
+  if (s.failCount >= FAIL_THRESHOLD) {
+    s.room.valid = false;            // stop advertising a room we cannot read
+    s.nextTryAt  = millis() + FAIL_BACKOFF_MS;
+    if (s.nextTryAt == 0) s.nextTryAt = 1;   // 0 is the "eligible now" sentinel
+  }
+  return false;
+}
+
 int pollAllRooms() {
   int n = 0;
-  for (int e = 0; e < ELEMENT_COUNT && n < MAX_ROOMS; e++) {
-    Room r;
-    if (readRoom(e, r)) s_rooms[n++] = r;
+  for (int e = 0; e < ELEMENT_COUNT; e++) {
+    if (updateSlot(e)) n++;
     yield();
   }
-  s_count    = n;
-  s_lastPoll = millis();
+  s_lastSweep = millis();
   return n;
 }
 
-int         roomCount()   { return s_count; }
-uint32_t    lastPollAt()  { return s_lastPoll; }
+void pollStep() {
+  uint32_t now = millis();
+  if (now - s_lastStep < POLL_STEP_MS) return;
+  s_lastStep = now;
+
+  int e = s_cursor;
+  if (++s_cursor >= ELEMENT_COUNT) {   // wrapped -> a full sweep just finished
+    s_cursor    = 0;
+    s_lastSweep = now;
+  }
+
+  // Signed compare so millis() rollover is handled correctly.
+  ElementSlot &s = s_slots[e];
+  if (s.nextTryAt != 0 && (int32_t)(now - s.nextTryAt) < 0) return;  // backing off
+
+  updateSlot(e);
+}
+
+uint32_t lastPollAt() { return s_lastSweep; }
+
+int roomCount() {
+  int n = 0;
+  for (int i = 0; i < ELEMENT_COUNT; i++)
+    if (s_slots[i].room.valid) n++;
+  return n;
+}
 
 const Room* roomAt(int idx) {
-  if (idx < 0 || idx >= s_count) return nullptr;
-  return &s_rooms[idx];
+  if (idx < 0) return nullptr;
+  for (int i = 0; i < ELEMENT_COUNT; i++) {
+    if (!s_slots[i].room.valid) continue;
+    if (idx-- == 0) return &s_slots[i].room;
+  }
+  return nullptr;
 }
 
 const Room* roomById(int id) {
-  for (int i = 0; i < s_count; i++)
-    if (s_rooms[i].id == id) return &s_rooms[i];
+  for (int i = 0; i < ELEMENT_COUNT; i++)
+    if (s_slots[i].room.valid && s_slots[i].room.id == id)
+      return &s_slots[i].room;
   return nullptr;
 }
 
 // Refresh a single room in place after a write.
 static void refreshRoom(int id) {
-  for (int i = 0; i < s_count; i++) {
-    if (s_rooms[i].id == id) {
-      Room r;
-      if (readRoom(s_rooms[i].elementIndex, r)) s_rooms[i] = r;
+  for (int i = 0; i < ELEMENT_COUNT; i++)
+    if (s_slots[i].room.valid && s_slots[i].room.id == id) {
+      updateSlot(i);
       return;
     }
-  }
 }
 
 bool setRoomManualTemp(int id, float celsius) {

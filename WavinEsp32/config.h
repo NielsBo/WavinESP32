@@ -30,16 +30,28 @@
 #define WAVIN_SERIAL_CFG  SERIAL_8N1
 
 #define UNIT_ID           1      // every AHC9000 answers at logical address 1
-#define RESPONSE_TIMEOUT  1000   // ms to wait for a reply
+// A healthy AHC9000 replies in single-digit ms. Keep this tight: it is also the
+// worst-case time loop() can be blocked by one failed transaction.
+#define RESPONSE_TIMEOUT  300    // ms to wait for a reply
 #define FRAME_GAP_MS      5      // silence that marks end of frame
 
 // ---------------------------------------------------------------------------
 // Polling
 // ---------------------------------------------------------------------------
 #define ELEMENT_COUNT     10     // how many element pages to scan (max 48)
-#define MAX_ROOMS         16
-#define POLL_INTERVAL_MS  30000
+#define MAX_ROOMS         ELEMENT_COUNT
+#define POLL_INTERVAL_MS  30000  // time for one full sweep of all elements
 #define MIN_VALID_TEMP    2.0    // room temp <= this means "no sensor" -> skip
+
+// Polling is incremental: one element per step, spread across the interval, so
+// loop() is never blocked for more than a single transaction. This keeps HTTP,
+// OTA and the status LED responsive even when the bus is dead.
+#define POLL_STEP_MS      (POLL_INTERVAL_MS / ELEMENT_COUNT)
+
+// After this many consecutive failures an element is parked for FAIL_BACKOFF_MS
+// instead of being retried every sweep (empty pages and dead thermostats).
+#define FAIL_THRESHOLD    3
+#define FAIL_BACKOFF_MS   300000  // 5 minutes
 
 // ---------------------------------------------------------------------------
 // Status LED
