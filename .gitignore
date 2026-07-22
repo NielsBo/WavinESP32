@@ -1,0 +1,12 @@
+# Never commit real credentials
+WavinEsp32/secrets.h
+
+# Arduino / build artifacts
+build/
+*.bin
+*.elf
+*.hex
+*.map
+
+# OS
+.DS_Store

@@ -1,0 +1,193 @@
+# Wavin AHC9000 → ESP32 HTTP bridge
+
+Reads room temperatures, setpoints and heat demand from a **Wavin AHC9000** underfloor-heating
+controller (OEM: Jablotron **AC-116**) over **RS-485 Modbus RTU**, and exposes them as a small
+**JSON API**. Built with the **Arduino IDE** for a classic **ESP32-WROOM-32**.
+
+Protocol source of truth: [docs/WAVIN_REGISTER_MAP.md](docs/WAVIN_REGISTER_MAP.md) — transcribed
+from the OEM *AC-116 Modbus Register Map*.
+
+Prior art worth reading for protocol validation: `dkjonas/Wavin-AHC-9000-mqtt` (ESP8266, MQTT).
+
+---
+
+## 1. Hardware
+
+| Item | Notes |
+|---|---|
+| ESP32-WROOM-32 DevKit ("ESP-32S") | classic dual-core ESP32 |
+| TTL ↔ RS-485 module | e.g. MAX485/MAX3485 breakout. **NOT** a USB-RS485 adapter |
+| 120 Ω termination | only if the ESP sits at the physical end of the bus |
+| Wires to the AHC9000 | RS-485 **A**, **B** and **GND** |
+
+### ⚠️ Power / logic levels — depends on your transceiver
+
+**The ESP32 is not 5V-tolerant.** Whatever drives `RO`/`TXD` into GPIO16 must not exceed 3.3V.
+
+**A. Genuine MAX485 (e.g. `MAX485CSA`) — a 5V-only part (4.75–5.25V):**
+power `VCC` from **5V** and drop `RO` with a divider before GPIO16:
+
+```
+MAX485 RO ──┬── 1kΩ ──┬── GPIO16
+            │         │
+                     2kΩ
+                      │
+                     GND          ->  5V x 2/(1+2) ~= 3.3V   (2.2k + 3.3k also works)
+```
+`DI` and `DE`/`RE` connect **directly** — they are ESP32 outputs, and 3.3V clears the MAX485's
+2.0V input threshold. Note some DevKits drop the `5V`/`VIN` rail to ~4.7V over a Schottky diode
+when USB-powered; usually fine, but use a real 5V supply if it is flaky.
+
+**B. 3.3V-capable transceiver (MAX3485 / SP3485 / auto-direction modules):**
+power `VCC` from **3V3** and wire `RO` straight to GPIO16 — no divider needed.
+
+Running a genuine MAX485 at 3.3V (no divider) is the common hobby shortcut and often works on a
+short bus, but it is **out of spec** — fine as a quick test, not for the final install. Watch
+`modbusErr` in `/health`.
+
+### Wiring
+
+| RS-485 module | ESP32 | Purpose |
+|---|---|---|
+| `RO` / `TXD` | **GPIO16** (RX2) | ESP receives ← bus |
+| `DI` / `RXD` | **GPIO17** (TX2) | ESP transmits → bus |
+| `DE` + `RE` *(manual modules only)* | **GPIO4** | direction; omit on auto-direction modules |
+| `VCC` | **3V3** | never 5V |
+| `GND` | GND | common ground with the bus |
+| `A` / `B` | AHC9000 A / B | differential pair |
+
+**Two module variants — check the silkscreen:**
+- Pins `VCC GND TXD RXD A B` → **auto-direction**: set `AUTO_DIRECTION 1`, leave GPIO4 unused.
+- Pins `RO DI RE DE VCC GND A B` → **manual**: tie `DE`+`RE` together to GPIO4, set `AUTO_DIRECTION 0`.
+
+If reads fail, try swapping the RX/TX pair — module labelling is inconsistent between vendors.
+
+### Status LED
+
+The onboard LED (**GPIO2** on most DevKits) shows the state of the **Wavin Modbus link** at a
+glance — no serial cable needed:
+
+| LED | Meaning |
+|---|---|
+| **Brief flash once per second** (heartbeat) | ✅ Modbus link up — talking to the AHC9000 |
+| **Fast blink (5 Hz)** | ❌ No Modbus link — board is alive, but the bus is not answering |
+
+"Link up" = a Modbus transaction succeeded within `MODBUS_OK_TIMEOUT_MS` (default: two poll
+intervals + 15 s, so a single missed poll won't trip it). The same signal drives `"serial"` in
+`/health`. If your board's LED is wired active-low, set `LED_ACTIVE_HIGH 0` in `config.h`.
+
+---
+
+## 2. Arduino IDE setup
+
+1. **Board support** — `File → Preferences → Additional Boards Manager URLs`:
+   `https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json`
+   then `Tools → Board → Boards Manager` → install **esp32 by Espressif**.
+2. **Board** — `Tools → Board → ESP32 Arduino → ESP32 Dev Module`. Select your `Port`.
+3. **Library** — `Tools → Manage Libraries` → install **ArduinoJson** (v6 or v7, both supported).
+   `WiFi`, `WebServer`, `ESPmDNS` and `ArduinoOTA` ship with the ESP32 core.
+4. **Secrets** — copy `WavinEsp32/secrets.h.example` to `WavinEsp32/secrets.h` and fill in your
+   WiFi credentials and an API token. `secrets.h` is gitignored.
+5. Open `WavinEsp32/WavinEsp32.ino` and **Upload**. Serial Monitor at **115200**.
+
+---
+
+## 3. Configuration
+
+All in `WavinEsp32/config.h`:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `AUTO_DIRECTION` | `1` | 1 = auto module (no DE pin), 0 = manual DE/RE on `DE_PIN` |
+| `DE_PIN` / `RXD2` / `TXD2` | 4 / 16 / 17 | RS-485 pins |
+| `WAVIN_SERIAL_CFG` | `SERIAL_8N1` | **OEM spec is 8N1**; try `SERIAL_8N2` only if reads fail |
+| `UNIT_ID` | `1` | every AHC9000 answers at logical address 1 |
+| `ELEMENT_COUNT` | `10` | how many element pages to scan (max 48) |
+| `POLL_INTERVAL_MS` | `30000` | poll cadence |
+| `MDNS_NAME` | `wavin` | → `http://wavin.local` |
+| `LED_PIN` / `LED_ACTIVE_HIGH` | 2 / 1 | status LED; set 0 for active-low boards |
+| `MODBUS_OK_TIMEOUT_MS` | 2×poll+15s | how long without a good read before "link down" |
+
+---
+
+## 4. HTTP API
+
+Reads are served from the in-memory cache refreshed by the poll loop, so they are instant and keep
+the RS-485 bus quiet. Writes go straight to the controller, then refresh that room.
+
+```
+GET http://wavin.local/health
+→ {"status":"ok","serial":"up","rooms":10,"lastPollMs":4210,"uptimeS":3600,
+   "ip":"192.168.0.42","rssi":-58,"modbusOk":420,"modbusErr":3}
+
+GET http://wavin.local/rooms
+→ [ {"id":1,"syncGroup":3,"current":22.4,"desired":21.0,"manual":21.0,"floor":23.1,
+     "mode":"manual","output":true,"alive":true,"lowBattery":false,
+     "humidity":41,"battery":80,"rssi":-61.5,"rssiUnit":-58.0,"cooling":false}, ... ]
+
+GET http://wavin.local/rooms/1        → a single room object
+```
+
+**Control** (requires the token header):
+
+```bash
+curl -X POST http://wavin.local/rooms/1 \
+     -H "X-Api-Token: your-token" \
+     -H "Content-Type: application/json" \
+     -d '{"manualTemp":21.5}'
+
+curl -X POST http://wavin.local/rooms/1 \
+     -H "X-Api-Token: your-token" \
+     -H "Content-Type: application/json" \
+     -d '{"mode":"manual"}'      # manual | standby | eco | comfort | schedule
+```
+
+> **`Content-Type: application/json` is required.** The ESP32 `WebServer` parses
+> `application/x-www-form-urlencoded` bodies into form args instead of exposing the raw JSON, so
+> omitting the header makes the body unreadable (you'd get `400 bad_json`).
+
+Errors: `{"error":"...","message":"..."}` with `400` validation, `401` bad token, `404` unknown
+room, `409` Modbus write failed.
+
+Mode changes use the OEM **masked write (0x45)** so only `MODE[2:0]` + `SCHED ENA` are touched —
+the lock/floor/cooling bits are preserved and there is no read-modify-write race.
+
+---
+
+## 5. Bring-up order
+
+Do these in order — the protocol is the risky part, so prove it read-only first.
+
+1. **Flash and watch the Serial Monitor.** On boot it prints the RS-485 config, the IP, and the
+   result of the first poll. If you see rooms with sane temperatures, the wiring and codec work.
+2. **No rooms found?** In order: swap RX/TX; verify `AUTO_DIRECTION` matches your module; confirm
+   the module is on **3V3**; check A/B polarity; try `SERIAL_8N2`. Watch `modbusErr` in `/health`.
+3. **Verify over HTTP:** `curl http://wavin.local/health` and `curl http://wavin.local/rooms`.
+4. **Test one write** on a single room with the `curl` above, and confirm the thermostat reflects it.
+5. Only then wire it into the gateway.
+
+---
+
+## 6. Layout
+
+```
+WavinEsp32/
+├── WavinEsp32.ino     setup/loop, WiFi, mDNS, OTA, poll scheduler
+├── config.h           pins, serial, poll interval, mDNS name
+├── secrets.h          WiFi + API token (gitignored; copy from .example)
+├── wavin_modbus.*     RS-485 transport: CRC16, framing, 0x43/0x44/0x45
+├── wavin_domain.*     register constants + element/room decode, control
+└── http_api.*         WebServer routes and JSON serialisation
+docs/
+└── WAVIN_REGISTER_MAP.md   full OEM register map and function codes
+```
+
+---
+
+## 7. Beyond the basics
+
+The controller supports far more than this bridge currently uses — DHW setpoints and cleaning
+schedule, high-temp cutoff, per-room floor limits / alarms / hysteresis, cooling mode, relay and
+pump control, per-channel and total power, week schedules, change-flag polling and thermostat
+pairing. All of it is documented in [docs/WAVIN_REGISTER_MAP.md](docs/WAVIN_REGISTER_MAP.md); the
+`wavin_modbus` layer can already read and write any of it.
