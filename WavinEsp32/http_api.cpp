@@ -4,6 +4,7 @@
 #include "wavin_domain.h"
 #include "wavin_modbus.h"
 #include "status_led.h"
+#include "relay_control.h"
 
 #include <WiFi.h>
 #include <WebServer.h>
@@ -63,6 +64,7 @@ static void handleHealth() {
   doc["rssi"]       = WiFi.RSSI();
   doc["modbusOk"]   = wavinOk();
   doc["modbusErr"]  = wavinErrors();
+  doc["relayOverride"] = anyRelayOverridden();
   String out;
   serializeJson(doc, out);
   server.send(200, "application/json", out);
@@ -90,6 +92,45 @@ static void sendRoom(const Room *r) {
   JSON_DOC(doc, 512);
   JsonObject o = doc.to<JsonObject>();
   roomToJson(r, o);
+  String out;
+  serializeJson(doc, out);
+  server.send(200, "application/json", out);
+}
+
+static void relayToJson(int id, const RelayInfo &r, JsonObject o) {
+  o["id"]         = id;
+  o["known"]      = r.known;
+  o["assignMap"]  = r.assignMap;      // 0 = no channel can switch this relay
+  o["enabled"]    = !r.overridden;
+  o["overridden"] = r.overridden;
+  o["restoreInS"] = r.restoreInS;
+  o["event"]      = relayEventName(r.event);
+}
+
+static void handleRelays() {
+  JSON_DOC(doc, 1024);
+  JsonArray arr = doc.to<JsonArray>();
+  for (int id = 1; id <= relayCount(); id++) {
+    RelayInfo r;
+    if (!relayGet(id, r)) continue;
+#if ARDUINOJSON_VERSION_MAJOR >= 7
+    JsonObject o = arr.add<JsonObject>();
+#else
+    JsonObject o = arr.createNestedObject();
+#endif
+    relayToJson(id, r, o);
+  }
+  String out;
+  serializeJson(doc, out);
+  server.send(200, "application/json", out);
+}
+
+static void sendRelay(int id) {
+  RelayInfo r;
+  if (!relayGet(id, r)) { sendError(404, "not_found", "unknown relay id"); return; }
+  JSON_DOC(doc, 384);
+  JsonObject o = doc.to<JsonObject>();
+  relayToJson(id, r, o);
   String out;
   serializeJson(doc, out);
   server.send(200, "application/json", out);
@@ -141,6 +182,35 @@ static void handleNotFound() {
       return;
     }
   }
+
+  if (uri.startsWith("/relays/")) {
+    int id = uri.substring(8).toInt();
+    if (id < 1 || id > relayCount()) { sendError(404, "not_found", "unknown relay id"); return; }
+
+    if (server.method() == HTTP_GET) { sendRelay(id); return; }
+
+    if (server.method() == HTTP_POST) {
+      if (!authorized()) { sendError(401, "unauthorized", "missing or bad X-Api-Token"); return; }
+
+      JSON_DOC(body, 256);
+      DeserializationError err = deserializeJson(body, server.arg("plain"));
+      if (err) { sendError(400, "bad_json", err.c_str()); return; }
+
+      if (body["enabled"].isNull()) {
+        sendError(400, "bad_request", "expected enabled");
+        return;
+      }
+      bool     enabled = body["enabled"].as<bool>();
+      uint32_t after   = body["restoreAfterS"].isNull()
+                           ? 0 : body["restoreAfterS"].as<uint32_t>();
+      if (!relaySetEnabled(id, enabled, after)) {
+        sendError(409, "busy", "relay write failed");
+        return;
+      }
+      sendRelay(id);
+      return;
+    }
+  }
   sendError(404, "not_found", "no such endpoint");
 }
 
@@ -150,6 +220,7 @@ void httpBegin() {
 
   server.on("/health", HTTP_GET, handleHealth);
   server.on("/rooms",  HTTP_GET, handleRooms);
+  server.on("/relays", HTTP_GET, handleRelays);
   server.onNotFound(handleNotFound);
   server.begin();
 }

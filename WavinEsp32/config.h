@@ -54,6 +54,17 @@
 #define FAIL_BACKOFF_MS   300000  // 5 minutes
 
 // ---------------------------------------------------------------------------
+// Relay override (suppressing the call-for-heat to the heat source)
+// ---------------------------------------------------------------------------
+// The AHC9000 has two relays; clearing a relay's assignment map stops any
+// channel from switching it. That setting is NON-VOLATILE on the controller,
+// so an override must always be time-limited and recoverable - otherwise a
+// crash or a forgotten call leaves the house without heat.
+#define RELAY_COUNT              2
+#define RELAY_OVERRIDE_DEFAULT_S 1800    // 30 min if the caller does not say
+#define RELAY_OVERRIDE_MAX_S     14400   // 4 h hard cap - no indefinite disable
+
+// ---------------------------------------------------------------------------
 // Status LED
 // ---------------------------------------------------------------------------
 // GPIO2 is the onboard blue LED on most ESP32 DevKit boards. (It is also a

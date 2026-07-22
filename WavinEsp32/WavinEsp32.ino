@@ -19,6 +19,7 @@
 #include "wavin_domain.h"
 #include "http_api.h"
 #include "status_led.h"
+#include "relay_control.h"
 
 static uint32_t lastWifiAttempt = 0;
 static uint32_t lastLoggedSweep = 0;
@@ -57,6 +58,7 @@ void setup() {
   statusLedBegin();
   wavinBegin();
   wavinDomainBegin();
+  relayBegin();   // also recovers any relay override left over from a crash
 
   wifiConnect();
 
@@ -80,6 +82,7 @@ void loop() {
   ArduinoOTA.handle();
   httpLoop();
   statusLedLoop();
+  relayLoop();      // enforces relay override auto-restore deadlines
 
   // Non-blocking WiFi reconnect with backoff.
   if (WiFi.status() != WL_CONNECTED && millis() - lastWifiAttempt > 10000) {

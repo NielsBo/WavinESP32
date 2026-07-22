@@ -76,6 +76,15 @@
 #define MODE_PARTY     4
 #define MODE_HOLIDAY   5
 
+// RELAYS (0x04), page = relay index. The assignment map decides which channels
+// can switch the relay; clearing it suppresses the output entirely.
+#define RL_TIMER_EVENT  0x00
+#define RL_ASSIGN_MAP   0x01
+#define RL_START_DELAY  0x02
+#define RL_STOP_DELAY   0x03
+#define RL_ACT_INTERVAL 0x04
+#define RL_ACT_DURATION 0x05
+
 // CHANNELS (0x03)
 #define CH_TIMER_EVENT 0x00
 #define CH_CURRENT     0x01

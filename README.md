@@ -4,6 +4,7 @@ Reads room temperatures, setpoints and heat demand from a **Wavin AHC9000** unde
 controller (OEM: Jablotron **AC-116**) over **RS-485 Modbus RTU**, and exposes them as a small
 **JSON API**. Built with the **Arduino IDE** for a classic **ESP32-WROOM-32**.
 
+Writing a client? See **[docs/API.md](docs/API.md)** — the integration guide.
 Protocol source of truth: [docs/WAVIN_REGISTER_MAP.md](docs/WAVIN_REGISTER_MAP.md) — transcribed
 from the OEM *AC-116 Modbus Register Map*.
 
@@ -109,6 +110,7 @@ All in `WavinEsp32/config.h`:
 | `MDNS_NAME` | `wavin` | → `http://wavin.local` |
 | `LED_PIN` / `LED_ACTIVE_HIGH` | 2 / 1 | status LED; set 0 for active-low boards |
 | `MODBUS_OK_TIMEOUT_MS` | 2×poll+15s | how long without a good read before "link down" |
+| `RELAY_OVERRIDE_DEFAULT_S` / `_MAX_S` | 30 min / 4 h | relay suppression deadline and hard cap |
 
 ---
 
@@ -163,6 +165,23 @@ room, `409` Modbus write failed.
 Mode changes use the OEM **masked write (0x45)** so only `MODE[2:0]` + `SCHED ENA` are touched —
 the lock/floor/cooling bits are preserved and there is no read-modify-write race.
 
+**Relays** — one drives the circulation pump, one signals the heat source:
+
+```bash
+curl http://wavin.local/relays
+
+curl -X POST http://wavin.local/relays/2 \
+     -H "X-Api-Token: your-token" -H "Content-Type: application/json" \
+     -d '{"enabled":false,"restoreAfterS":1800}'   # suppress the call for heat, 30 min
+```
+
+Suppressing a relay clears its assignment map, which is **non-volatile on the controller**. Every
+override is therefore time-limited (default 30 min, hard cap 4 h), persisted to NVS so a reboot
+restores it, and auto-restored on-device. See [§8](#8-heat-redistribution) and
+[docs/API.md](docs/API.md).
+
+Full client-facing contract: **[docs/API.md](docs/API.md)**.
+
 ---
 
 ## 5. Bring-up order
@@ -188,8 +207,11 @@ WavinEsp32/
 ├── secrets.h          WiFi + API token (gitignored; copy from .example)
 ├── wavin_modbus.*     RS-485 transport: CRC16, framing, 0x43/0x44/0x45
 ├── wavin_domain.*     register constants + element/room decode, control
+├── relay_control.*    pump / heat-source relay override, with auto-restore
+├── status_led.*       onboard LED shows the Modbus link state
 └── http_api.*         WebServer routes and JSON serialisation
 docs/
+├── API.md                  integration guide for the controlling application
 └── WAVIN_REGISTER_MAP.md   full OEM register map and function codes
 ```
 
