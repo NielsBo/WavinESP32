@@ -37,7 +37,12 @@ so the response reflects real state, not an echo of your request.
 ```json
 { "status": "ok", "serial": "up", "rooms": 10, "lastPollMs": 4210,
   "uptimeS": 3600, "ip": "192.168.0.42", "rssi": -58,
-  "modbusOk": 420, "modbusErr": 3, "relayOverride": false, "chipTemp": 48.3 }
+  "modbusOk": 420, "modbusErr": 3, "relayOverride": false, "chipTemp": 48.3,
+  "diag": { "silent": 0, "crcFail": 0, "runt": 0, "badFrame": 3,
+            "rxBytes": 8904, "leadJunk": 423,
+            "lastFrame": "01 43 10 00 F2 ...", "longestFrame": "01 43 10 00 F2 ...",
+            "baud": 38400, "stopBits": 1, "autoDir": false,
+            "rxPin": 16, "txPin": 17, "dePin": 4 } }
 ```
 
 | Field | Use |
@@ -48,6 +53,16 @@ so the response reflects real state, not an echo of your request.
 | `modbusOk` / `modbusErr` | cumulative counters; a climbing `modbusErr` means bus trouble |
 | `relayOverride` | **true if a relay is currently suppressed** — see §4 |
 | `chipTemp` | ESP32 **die** temperature °C, or `null` if the chip has no sensor. Not room temperature — it runs well above ambient. Useful only as a trend (enclosure overheating) |
+| `diag` | **Bring-up and bus diagnostics.** Not part of the control contract — a client should never branch on it. See below |
+
+`diag` breaks `modbusErr` into causes, which is what you need when the bus misbehaves:
+`silent` (no reply at all) points at wiring or direction control; `crcFail` (reply arrived,
+mangled) points at framing or noise; `runt` at truncated frames; `badFrame` at a protocol
+mismatch. `lastFrame` / `longestFrame` are hex dumps of what actually came back — `longestFrame`
+is kept separately because single-byte line glitches would otherwise overwrite the only real
+reply. `leadJunk` counts bytes discarded ahead of the unit id from RS-485 driver turnaround;
+about one per transaction is normal. The remaining fields echo the compiled-in serial settings
+so you can confirm what was actually flashed. Counters are cumulative since boot and never reset.
 
 Poll this on your own schedule. Treat `serial: "down"` as *"all room data is stale, do not act on
 it"*.

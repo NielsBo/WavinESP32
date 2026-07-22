@@ -62,6 +62,15 @@ short bus, but it is **out of spec** — fine as a quick test, not for the final
 - Pins `RO DI RE DE VCC GND A B` → **manual**: tie `DE`+`RE` together to GPIO4, set `AUTO_DIRECTION 0`.
 
 If reads fail, try swapping the RX/TX pair — module labelling is inconsistent between vendors.
+But check `diag` in `/health` first (see [§5](#5-bring-up-order)): if bytes are arriving, your
+wiring is already right and swapping it will only mislead you.
+
+**Driver turnaround glitch.** On a manual-direction module, releasing `DE` after transmitting
+leaves the line floating for an instant, which fakes a start bit and injects a spurious `0x00`
+ahead of the controller's reply. The transport discards leading bytes until it sees `UNIT_ID`,
+so this is handled — `diag.leadJunk` counts them, and roughly one per transaction is normal.
+If it climbs much faster than that, the bus bias is weak: add proper bias resistors, or fit the
+120 Ω termination if the run is long.
 
 ### Status LED
 
@@ -101,7 +110,7 @@ All in `WavinEsp32/config.h`:
 |---|---|---|
 | `AUTO_DIRECTION` | `0` | 0 = manual DE/RE on `DE_PIN`, 1 = auto module (no DE pin) |
 | `DE_PIN` / `RXD2` / `TXD2` | 4 / 16 / 17 | RS-485 pins |
-| `WAVIN_SERIAL_CFG` | `SERIAL_8N1` | **OEM spec is 8N1**; try `SERIAL_8N2` only if reads fail |
+| `WAVIN_SERIAL_CFG` | `SERIAL_8N1` | **OEM spec is 8N1**; try `SERIAL_8N2` only if `diag.crcFail` is climbing. A receiver set to 8N1 reads an 8N2 stream fine, so this is rarely the fault |
 | `RESPONSE_TIMEOUT` | `300` | ms; also the worst-case time one failed read can block `loop()` |
 | `UNIT_ID` | `1` | every AHC9000 answers at logical address 1 |
 | `ELEMENT_COUNT` | `10` | how many element pages to scan (max 48) |
@@ -190,8 +199,32 @@ Do these in order — the protocol is the risky part, so prove it read-only firs
 
 1. **Flash and watch the Serial Monitor.** On boot it prints the RS-485 config, the IP, and the
    result of the first poll. If you see rooms with sane temperatures, the wiring and codec work.
-2. **No rooms found?** In order: swap RX/TX; verify `AUTO_DIRECTION` matches your module; confirm
-   the module is on **3V3**; check A/B polarity; try `SERIAL_8N2`. Watch `modbusErr` in `/health`.
+2. **No rooms found?** Don't guess at wiring — read `diag` in `/health` first. It splits failures
+   into categories that point at completely different faults, and swapping wires blind can turn a
+   working setup into a broken one:
+
+   ```
+   curl http://wavin.local/health | python3 -m json.tool
+   ```
+
+   | What `diag` shows | What it means | What to do |
+   |---|---|---|
+   | `silent` climbing, `rxBytes: 0` | Nothing on the wire at all | DE/direction, A/B polarity, wiring, power. **Framing changes cannot help here** |
+   | `crcFail` climbing, `rxBytes` > 0 | Bus is talking, bytes are mangled | Read `longestFrame`; try `SERIAL_8N2`; suspect noise or termination |
+   | `runt` climbing | Fragments only | Look at `longestFrame` — usually a real reply truncated by a glitch byte |
+   | `badFrame` climbing | Valid frame, wrong content | Protocol-level: check `UNIT_ID` and the register map |
+
+   **`longestFrame` is the single most useful field.** A healthy AHC9000 reply starts `01 43`
+   (unit id, function code) followed by a byte count. If you can see that pattern anywhere in the
+   dump, your wiring, baud and framing are all *already correct* and the problem is elsewhere.
+   `leadJunk` counting up ~once per transaction is normal and harmless — see below.
+
+   Remember each element is parked for `FAIL_BACKOFF_MS` (5 min) after `FAIL_THRESHOLD` failures,
+   so **reboot after every change** and read `/health` within ~90 s. Otherwise you are looking at a
+   backed-off bus and will conclude nothing changed.
+
+   Only if `diag` says nothing is arriving: swap RX/TX; verify `AUTO_DIRECTION` matches your
+   module; confirm the module's supply and the `RO` divider; check A/B polarity.
 3. **Verify over HTTP:** `curl http://wavin.local/health` and `curl http://wavin.local/rooms`.
 4. **Test one write** on a single room with the `curl` above, and confirm the thermostat reflects it.
 5. Only then wire it into the gateway.

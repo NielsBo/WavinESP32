@@ -29,3 +29,24 @@ bool     wavinBusy();        // a transaction is in flight
 uint32_t wavinErrors();      // cumulative failed transactions
 uint32_t wavinOk();          // cumulative successful transactions
 uint32_t wavinLastOkAt();    // millis() of last successful transaction, 0 = never
+
+// Failure breakdown, for bring-up. s_errors is the sum of these four; which one
+// is counting tells you where to look:
+//
+//   silent   -> nothing on the wire: DE/direction, A-B polarity, wiring, power
+//   crcFail  -> the bus IS talking, the bytes are mangled: baud, stop bits, noise
+//   runt     -> a fragment arrived: marginal signal or a too-tight frame gap
+//   badFrame -> valid frame, but not the answer we asked for: protocol/unit id
+uint32_t wavinSilent();
+uint32_t wavinRunt();
+uint32_t wavinCrcFail();
+uint32_t wavinBadFrame();
+uint32_t wavinRxBytes();     // cumulative bytes received, valid or not
+uint32_t wavinLeadJunk();    // bytes discarded ahead of the unit id (DE turnaround
+                             // glitch). A steady ~1 per transaction is normal.
+
+// Responses as "01 43 06 ..." hex, or "" if nothing has ever arrived.
+// Longest is kept separately because 1-byte line glitches would otherwise
+// overwrite the only real reply you have.
+String   wavinLastFrameHex();
+String   wavinLongestFrameHex();

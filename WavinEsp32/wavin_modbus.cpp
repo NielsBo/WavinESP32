@@ -12,6 +12,26 @@ static uint32_t s_errors = 0;
 static uint32_t s_ok     = 0;
 static uint32_t s_lastOk = 0;   // millis() of last success, 0 = never
 
+// Failure breakdown. A bring-up aid: "no reply at all" and "reply arrived but
+// was mangled" look identical in s_errors, yet point at opposite faults
+// (wiring/direction vs framing/noise).
+static uint32_t s_silent   = 0;  // nothing came back
+static uint32_t s_runt     = 0;  // <4 bytes: too short to hold a CRC
+static uint32_t s_crcFail  = 0;  // bytes arrived, CRC did not match
+static uint32_t s_badFrame = 0;  // CRC good, but wrong unit/fc/length
+static uint32_t s_rxBytes  = 0;  // cumulative bytes seen on the wire
+static uint32_t s_leadJunk = 0;  // bytes dropped ahead of the unit id (DE glitch)
+
+// Last response, kept for hex dump. Captured even when the frame is rejected -
+// that is exactly the case you need to look at.
+static uint8_t  s_lastResp[MAX_FRAME];
+static uint8_t  s_lastRespLen = 0;
+
+// The longest frame ever seen, kept separately: single-byte line glitches are
+// frequent and would otherwise overwrite the one real reply you need to read.
+static uint8_t  s_bestResp[MAX_FRAME];
+static uint8_t  s_bestRespLen = 0;
+
 // ---------------------------------------------------------------------------
 // CRC16-Modbus (poly 0xA001, init 0xFFFF). Appended low byte first.
 // ---------------------------------------------------------------------------
@@ -38,6 +58,28 @@ uint32_t wavinErrors()   { return s_errors; }
 uint32_t wavinOk()       { return s_ok; }
 uint32_t wavinLastOkAt() { return s_lastOk; }
 
+uint32_t wavinSilent()   { return s_silent; }
+uint32_t wavinRunt()     { return s_runt; }
+uint32_t wavinCrcFail()  { return s_crcFail; }
+uint32_t wavinBadFrame() { return s_badFrame; }
+uint32_t wavinRxBytes()  { return s_rxBytes; }
+uint32_t wavinLeadJunk() { return s_leadJunk; }
+
+static String toHex(const uint8_t *buf, uint8_t len) {
+  static const char HEXDIG[] = "0123456789ABCDEF";   // not HEX: Print.h #defines that
+  String s;
+  s.reserve(len * 3);
+  for (uint8_t i = 0; i < len; i++) {
+    if (i) s += ' ';
+    s += HEXDIG[buf[i] >> 4];
+    s += HEXDIG[buf[i] & 0x0F];
+  }
+  return s;                               // "" when nothing has ever arrived
+}
+
+String wavinLastFrameHex()    { return toHex(s_lastResp, s_lastRespLen); }
+String wavinLongestFrameHex() { return toHex(s_bestResp, s_bestRespLen); }
+
 // ---------------------------------------------------------------------------
 // One request/response transaction. `req` must NOT include the CRC; it is
 // appended here. Returns the response length (including CRC) or 0 on failure.
@@ -63,8 +105,15 @@ static size_t txrx(uint8_t *req, size_t reqLen, uint8_t *resp, size_t respMax) {
   uint32_t last  = start;
   while (millis() - start < RESPONSE_TIMEOUT) {
     if (Serial2.available()) {
-      if (n < respMax) resp[n++] = (uint8_t)Serial2.read();
-      else             Serial2.read();         // overflow: discard
+      uint8_t b = (uint8_t)Serial2.read();
+      // Discard anything ahead of the unit id. Releasing DE lets the line float
+      // for an instant, which fakes a start bit and injects a 0x00 before the
+      // reply. Left in place it both corrupts the CRC and - because it sets
+      // n > 0 - starts the inter-frame timer, so we give up during the gap
+      // before the controller has even answered.
+      if (n == 0 && b != UNIT_ID) { s_leadJunk++; continue; }
+      if (n < respMax) resp[n++] = b;
+      // else: overflow, drop the byte but keep the frame timer alive
       last = millis();
     } else if (n > 0 && (millis() - last) > FRAME_GAP_MS) {
       break;                                   // inter-frame silence -> done
@@ -72,11 +121,24 @@ static size_t txrx(uint8_t *req, size_t reqLen, uint8_t *resp, size_t respMax) {
     yield();
   }
 
-  if (n < 4) return 0;                         // too short to be valid
+  // Snapshot whatever arrived before judging it. Only on a non-empty read, so
+  // a later silent transaction does not erase the evidence.
+  if (n > 0) {
+    s_rxBytes    += n;
+    s_lastRespLen = (uint8_t)((n < MAX_FRAME) ? n : MAX_FRAME);
+    for (size_t i = 0; i < s_lastRespLen; i++) s_lastResp[i] = resp[i];
+    if (s_lastRespLen > s_bestRespLen) {
+      s_bestRespLen = s_lastRespLen;
+      for (uint8_t i = 0; i < s_bestRespLen; i++) s_bestResp[i] = s_lastResp[i];
+    }
+  }
+
+  if (n == 0) { s_silent++; return 0; }        // bus never answered
+  if (n < 4)  { s_runt++;   return 0; }        // too short to be valid
 
   uint16_t got  = (uint16_t)resp[n - 2] | ((uint16_t)resp[n - 1] << 8);
   uint16_t want = crc16(resp, n - 2);
-  if (got != want) return 0;
+  if (got != want) { s_crcFail++; return 0; }
 
   return n;
 }
@@ -114,6 +176,9 @@ static bool transact(uint8_t *req, size_t reqLen, uint8_t expectFc,
     if (s_lastOk == 0) s_lastOk = 1;   // 0 is reserved for "never"
   } else {
     s_errors++;
+    // n > 0 means txrx() accepted the CRC, so the rejection was ours: the unit
+    // id, function code or byte count did not match what we asked for.
+    if (n > 0) s_badFrame++;
   }
   s_busy = false;
   return ok;

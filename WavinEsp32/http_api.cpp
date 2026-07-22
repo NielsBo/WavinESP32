@@ -68,7 +68,7 @@ static float chipTempC() {
 #endif
 
 static void handleHealth() {
-  JSON_DOC(doc, 384);
+  JSON_DOC(doc, 1024);   // diag block + the last-frame hex string
   bool link = wavinLinkUp();
   doc["status"]     = (link && roomCount() > 0) ? "ok" : "degraded";
   doc["serial"]     = link ? "up" : "down";
@@ -81,6 +81,27 @@ static void handleHealth() {
   doc["modbusErr"]  = wavinErrors();
   doc["relayOverride"] = anyRelayOverridden();
   addFloat(doc.as<JsonObject>(), "chipTemp", chipTempC());
+
+  // Bring-up diagnostics: which kind of failure, and what the bus actually said.
+#if ARDUINOJSON_VERSION_MAJOR >= 7
+  JsonObject d = doc["diag"].to<JsonObject>();
+#else
+  JsonObject d = doc.createNestedObject("diag");
+#endif
+  d["silent"]    = wavinSilent();
+  d["crcFail"]   = wavinCrcFail();
+  d["runt"]      = wavinRunt();
+  d["badFrame"]  = wavinBadFrame();
+  d["rxBytes"]   = wavinRxBytes();
+  d["leadJunk"]  = wavinLeadJunk();
+  d["lastFrame"]    = wavinLastFrameHex();
+  d["longestFrame"] = wavinLongestFrameHex();
+  d["baud"]      = WAVIN_BAUD;
+  d["stopBits"]  = (WAVIN_SERIAL_CFG == SERIAL_8N2) ? 2 : 1;
+  d["autoDir"]   = (bool)AUTO_DIRECTION;
+  d["rxPin"]     = RXD2;
+  d["txPin"]     = TXD2;
+  d["dePin"]     = AUTO_DIRECTION ? -1 : DE_PIN;
   String out;
   serializeJson(doc, out);
   server.send(200, "application/json", out);
