@@ -72,6 +72,17 @@ so this is handled — `diag.leadJunk` counts them, and roughly one per transact
 If it climbs much faster than that, the bus bias is weak: add proper bias resistors, or fit the
 120 Ω termination if the run is long.
 
+### Enclosure
+
+A parametric snap-fit case for both boards lives in [`hardware/`](hardware/) — OpenSCAD source,
+ready-to-print STLs, and renders of every side. See [hardware/README.md](hardware/README.md).
+
+![Exploded view of the enclosure](hardware/renders/exploded.png)
+
+53.3 × 44.8 × 28.5 mm. The ESP32 and the MAX485 sit side by side on raised pads, both connectors
+leave through the same short wall, and the lid clicks on — no screws. The lid is shown flipped,
+the way you print it.
+
 ### Status LED
 
 The onboard LED (**GPIO2** on most DevKits) shows the state of the **Wavin Modbus link** at a
@@ -246,6 +257,11 @@ WavinEsp32/
 docs/
 ├── API.md                  integration guide for the controlling application
 └── WAVIN_REGISTER_MAP.md   full OEM register map and function codes
+hardware/
+├── esp32_max485_case.scad  snap-fit enclosure, parametric
+├── *.stl                   exported base + lid, ready to print
+├── render.sh               regenerates renders/ from the .scad
+└── README.md               dimensions, views, printing notes
 ```
 
 ---
