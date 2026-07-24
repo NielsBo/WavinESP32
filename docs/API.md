@@ -112,6 +112,43 @@ POST /relays/2   { "enabled": true }                           // restore now
 
 See §4 before using this — it has safety semantics you must understand.
 
+### `GET /mqtt` · `POST /mqtt`
+
+The bridge runs a small MQTT broker on port 1883. Whatever other devices
+publish to it is cached — last value per topic — and served here, so a client
+that already speaks REST does not need an MQTT library to read it.
+
+```json
+[ { "topic": "watts/2412000123/measurement",
+    "payload": "{\"positive_active_power\":3104,\"voltage_l1\":232.4}",
+    "bytes": 48, "ageMs": 1840, "count": 921 } ]
+```
+
+| Field | Use |
+|---|---|
+| `payload` | the message as text, when every byte is printable ASCII |
+| `payloadHex` | **replaces** `payload` when the bytes are not printable — binary payloads cannot go in a JSON string |
+| `bytes` | payload length actually stored |
+| `ageMs` | time since the last publish on this topic — **the freshness check** |
+| `count` | publishes seen on this topic since boot |
+| `truncated` | present and `true` if the payload was longer than `MQTT_MAX_PAYLOAD_LEN` |
+
+`GET /mqtt?topic=watts/2412000123/measurement` returns the single entry, or
+`404` if nothing has ever been published to it.
+
+`POST /mqtt` (**auth**) publishes to connected subscribers:
+
+```bash
+curl -X POST http://wavin.local/mqtt \
+     -H "X-Api-Token: $TOKEN" -H "Content-Type: application/json" \
+     -d '{"topic":"home/heating/state","payload":"idle"}'
+```
+
+Nothing is persisted. After a reboot the cache is empty until each device
+publishes again, and `ageMs` is the only thing that tells you so — a topic that
+has gone silent keeps returning its last value indefinitely. **Always check
+`ageMs` before acting on a payload.**
+
 ### Errors
 
 ```json
@@ -247,6 +284,8 @@ GET  /rooms                 GET  /rooms/{id}     room state (cached)
 POST /rooms/{id}            {manualTemp|mode|cooling}      auth
 GET  /relays                GET  /relays/{id}    relay state
 POST /relays/{id}           {enabled, restoreAfterS}       auth
+GET  /mqtt                  GET  /mqtt?topic=a/b cached MQTT last values
+POST /mqtt                  {topic, payload}               auth
 ```
 
 ```bash

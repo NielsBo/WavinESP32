@@ -5,6 +5,7 @@
 #include "wavin_modbus.h"
 #include "status_led.h"
 #include "relay_control.h"
+#include "mqtt_broker.h"
 
 #include <WiFi.h>
 #include <WebServer.h>
@@ -68,7 +69,7 @@ static float chipTempC() {
 #endif
 
 static void handleHealth() {
-  JSON_DOC(doc, 1024);   // diag block + the last-frame hex string
+  JSON_DOC(doc, 1536);   // diag block + the last-frame hex string + mqtt stats
   bool link = wavinLinkUp();
   doc["status"]     = (link && roomCount() > 0) ? "ok" : "degraded";
   doc["serial"]     = link ? "up" : "down";
@@ -81,6 +82,30 @@ static void handleHealth() {
   doc["modbusErr"]  = wavinErrors();
   doc["relayOverride"] = anyRelayOverridden();
   addFloat(doc.as<JsonObject>(), "chipTemp", chipTempC());
+
+  // Heap headroom. Worth watching now that the broker accepts inbound
+  // connections: minFree is the low-water mark since boot, which catches a
+  // squeeze that has already recovered by the time you look.
+  doc["freeHeap"]    = (uint32_t)ESP.getFreeHeap();
+  doc["minFreeHeap"] = (uint32_t)ESP.getMinFreeHeap();
+
+  if (mqttEnabled()) {
+#if ARDUINOJSON_VERSION_MAJOR >= 7
+    JsonObject m = doc["mqtt"].to<JsonObject>();
+#else
+    JsonObject m = doc.createNestedObject("mqtt");
+#endif
+    m["port"]       = MQTT_PORT;
+    m["clients"]    = mqttClients();
+    m["topics"]     = mqttTopicCount();
+    m["maxTopics"]  = MQTT_MAX_TOPICS;
+    m["messages"]   = mqttMessages();
+    m["evicted"]    = mqttEvicted();    // table full: raise MQTT_MAX_TOPICS
+    m["truncated"]  = mqttTruncated();  // raise MQTT_MAX_PAYLOAD_LEN
+    m["tooBig"]     = mqttTooBig();     // raise MQTT_MAX_MESSAGE_LEN
+    m["rejected"]   = mqttRejected();
+    m["authFailed"] = mqttAuthFailed();
+  }
 
   // Bring-up diagnostics: which kind of failure, and what the bus actually said.
 #if ARDUINOJSON_VERSION_MAJOR >= 7
@@ -102,6 +127,109 @@ static void handleHealth() {
   d["rxPin"]     = RXD2;
   d["txPin"]     = TXD2;
   d["dePin"]     = AUTO_DIRECTION ? -1 : DE_PIN;
+  String out;
+  serializeJson(doc, out);
+  server.send(200, "application/json", out);
+}
+
+// ---------------------------------------------------------------------------
+// MQTT last-value cache
+// ---------------------------------------------------------------------------
+static bool authorized();   // defined with the other write-path helpers below
+
+// Payloads arrive as arbitrary bytes. Watts Live sends JSON, so the common
+// case is a readable string - but a broker will happily carry binary, and
+// JSON strings cannot hold arbitrary bytes. Emit `payload` when the bytes are
+// printable UTF-8-safe ASCII, and fall back to `payloadHex` when they are not,
+// so a client can always tell which it is getting.
+static void mqttEntryToJson(const MqttEntry &e, JsonObject o) {
+  o["topic"]   = e.topic;
+  o["bytes"]   = e.len;
+  o["ageMs"]   = (uint32_t)(millis() - e.updatedAt);
+  o["count"]   = e.count;
+  if (e.truncated) o["truncated"] = true;
+
+  bool printable = true;
+  for (uint16_t i = 0; i < e.len && printable; i++)
+    if (e.payload[i] < 0x20 || e.payload[i] > 0x7E) printable = false;
+
+  if (printable) {
+    char buf[MQTT_MAX_PAYLOAD_LEN + 1];
+    memcpy(buf, e.payload, e.len);
+    buf[e.len] = '\0';
+    o["payload"] = buf;            // ArduinoJson copies the string
+  } else {
+    static const char HEXDIG[] = "0123456789ABCDEF";
+    String hex;
+    hex.reserve(e.len * 2);
+    for (uint16_t i = 0; i < e.len; i++) {
+      hex += HEXDIG[e.payload[i] >> 4];
+      hex += HEXDIG[e.payload[i] & 0x0F];
+    }
+    o["payloadHex"] = hex;
+  }
+}
+
+// GET /mqtt              -> every cached topic
+// GET /mqtt?topic=a/b    -> just that one, 404 if never seen
+static void handleMqttGet() {
+  if (!mqttEnabled()) { sendError(503, "disabled", "MQTT broker is compiled out"); return; }
+
+  String want = server.arg("topic");
+  if (want.length()) {
+    MqttEntry e;
+    if (!mqttEntryFor(want.c_str(), e)) {
+      sendError(404, "not_found", "no message cached for that topic");
+      return;
+    }
+    JSON_DOC(doc, MQTT_MAX_PAYLOAD_LEN * 3 + 256);
+    mqttEntryToJson(e, doc.to<JsonObject>());
+    String out;
+    serializeJson(doc, out);
+    server.send(200, "application/json", out);
+    return;
+  }
+
+  JSON_DOC(doc, (MQTT_MAX_PAYLOAD_LEN * 3 + 192) * MQTT_MAX_TOPICS + 256);
+  JsonArray arr = doc.to<JsonArray>();
+  MqttEntry e;
+  for (int i = 0; mqttEntryAt(i, e); i++) {
+#if ARDUINOJSON_VERSION_MAJOR >= 7
+    mqttEntryToJson(e, arr.add<JsonObject>());
+#else
+    mqttEntryToJson(e, arr.createNestedObject());
+#endif
+  }
+  String out;
+  serializeJson(doc, out);
+  server.send(200, "application/json", out);
+}
+
+// POST /mqtt  {"topic":"a/b","payload":"..."}  -> publish to subscribers
+static void handleMqttPost() {
+  if (!mqttEnabled()) { sendError(503, "disabled", "MQTT broker is compiled out"); return; }
+  if (!authorized()) { sendError(401, "unauthorized", "missing or bad X-Api-Token"); return; }
+
+  JSON_DOC(body, MQTT_MAX_PAYLOAD_LEN + 256);
+  DeserializationError err = deserializeJson(body, server.arg("plain"));
+  if (err) { sendError(400, "bad_json", err.c_str()); return; }
+
+  const char *topic = body["topic"];
+  if (!topic || !*topic) { sendError(400, "bad_request", "expected topic"); return; }
+
+  const char *payload = body["payload"] | "";
+  if (strlen(payload) > MQTT_MAX_PAYLOAD_LEN) {
+    sendError(413, "too_large", "payload exceeds MQTT_MAX_PAYLOAD_LEN");
+    return;
+  }
+  if (!mqttPublish(topic, payload)) {
+    sendError(400, "bad_topic", "topic empty or longer than MQTT_MAX_TOPIC_LEN");
+    return;
+  }
+
+  MqttEntry e;
+  JSON_DOC(doc, MQTT_MAX_PAYLOAD_LEN * 3 + 256);
+  if (mqttEntryFor(topic, e)) mqttEntryToJson(e, doc.to<JsonObject>());
   String out;
   serializeJson(doc, out);
   server.send(200, "application/json", out);
@@ -258,6 +386,8 @@ void httpBegin() {
   server.on("/health", HTTP_GET, handleHealth);
   server.on("/rooms",  HTTP_GET, handleRooms);
   server.on("/relays", HTTP_GET, handleRelays);
+  server.on("/mqtt",   HTTP_GET,  handleMqttGet);
+  server.on("/mqtt",   HTTP_POST, handleMqttPost);
   server.onNotFound(handleNotFound);
   server.begin();
 }

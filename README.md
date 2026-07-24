@@ -105,7 +105,8 @@ intervals + 15 s, so a single missed poll won't trip it). The same signal drives
    `https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json`
    then `Tools → Board → Boards Manager` → install **esp32 by Espressif**.
 2. **Board** — `Tools → Board → ESP32 Arduino → ESP32 Dev Module`. Select your `Port`.
-3. **Library** — `Tools → Manage Libraries` → install **ArduinoJson** (v6 or v7, both supported).
+3. **Libraries** — `Tools → Manage Libraries` → install **ArduinoJson** (v6 or v7, both
+   supported) and **PicoMQTT** (only if `MQTT_ENABLE` is 1 — see [§6](#6-mqtt-broker)).
    `WiFi`, `WebServer`, `ESPmDNS` and `ArduinoOTA` ship with the ESP32 core.
 4. **Secrets** — copy `WavinEsp32/secrets.h.example` to `WavinEsp32/secrets.h` and fill in your
    WiFi credentials and an API token. `secrets.h` is gitignored.
@@ -131,6 +132,10 @@ All in `WavinEsp32/config.h`:
 | `LED_PIN` / `LED_ACTIVE_HIGH` | 2 / 1 | status LED; set 0 for active-low boards |
 | `MODBUS_OK_TIMEOUT_MS` | 2×poll+15s | how long without a good read before "link down" |
 | `RELAY_OVERRIDE_DEFAULT_S` / `_MAX_S` | 30 min / 4 h | relay suppression deadline and hard cap |
+| `MQTT_ENABLE` / `MQTT_PORT` | 1 / 1883 | embedded broker; 0 compiles it and PicoMQTT out |
+| `MQTT_REQUIRE_AUTH` | `0` | require `MQTT_USER`/`MQTT_PASS` from `secrets.h` on connect |
+| `MQTT_MAX_TOPICS` / `_TOPIC_LEN` / `_PAYLOAD_LEN` | 16 / 64 / 512 | cache size, statically allocated (~9 kB) |
+| `MQTT_MAX_MESSAGE_LEN` | `1024` | hard ceiling on one MQTT message; larger are dropped |
 
 ---
 
@@ -242,7 +247,57 @@ Do these in order — the protocol is the risky part, so prove it read-only firs
 
 ---
 
-## 6. Layout
+## 6. MQTT broker
+
+The bridge runs a small MQTT broker on **port 1883**. Devices publish to it, the last
+payload per topic is cached in RAM, and the cache is served over REST at `/mqtt` — so a
+client that already talks to this API gets the extra data without speaking MQTT.
+
+Requires the **PicoMQTT** library (`Tools → Manage Libraries`). Costs about 16 kB of flash
+and 9.6 kB of RAM; set `MQTT_ENABLE 0` in `config.h` to compile it out entirely.
+
+⚠️ **This is a broker of convenience, not infrastructure.** Nothing is persisted, there is
+no TLS, and every client drops when the bridge reboots or takes an OTA update. Don't put
+anything on it that the heating depends on. If you already run Mosquitto or Home Assistant,
+publish there instead — this exists so a couple of sensors don't require a second box.
+
+The cache is bounded on purpose (`MQTT_MAX_TOPICS` × `MQTT_MAX_PAYLOAD_LEN`, statically
+allocated): a broker accepts whatever the network sends it, and an unbounded cache would be
+one hostile publisher away from taking the heating offline. Oversized payloads are stored
+truncated and the fullest table evicts its least recently updated topic — both are counted
+under `mqtt` in `/health`, along with `freeHeap`, so you can see it rather than guess.
+
+### Watts Live
+
+[Watts Live](https://watts.zendesk.com/hc/da/articles/10271861655580-Brug-Watts-Live-sammen-med-Home-Assistant)
+publishes to `watts/<serial>/measurement` — a JSON object of roughly 400 bytes carrying
+`positive_active_power`, `voltage_l1..l3`, `current_l1..l3`, the energy registers and so on.
+The defaults in `config.h` are sized for exactly that.
+
+Point it at the bridge over BLE (nRF Connect), per the Watts guide:
+
+| Setting | Value |
+|---|---|
+| Hostname | the bridge's **IP address** — not `wavin.local`; give it a DHCP reservation |
+| Port | `1883` |
+| Username / Password | leave empty, unless you set `MQTT_REQUIRE_AUTH 1` |
+
+Then watch it arrive:
+
+```sh
+curl http://wavin.local/mqtt | python3 -m json.tool
+```
+
+Watts Live cannot do TLS — the Watts guide says so explicitly — so credentials and readings
+cross the LAN in clear text. `MQTT_REQUIRE_AUTH` (with `MQTT_USER` / `MQTT_PASS` in
+`secrets.h`) keeps stray devices out; it is not a security boundary.
+
+Note `ageMs` in the response. A silent device keeps returning its last reading forever, so
+freshness is the client's job — see [docs/API.md](docs/API.md).
+
+---
+
+## 7. Layout
 
 ```
 WavinEsp32/
@@ -253,6 +308,7 @@ WavinEsp32/
 ├── wavin_domain.*     register constants + element/room decode, control
 ├── relay_control.*    pump / heat-source relay override, with auto-restore
 ├── status_led.*       onboard LED shows the Modbus link state
+├── mqtt_broker.*      embedded MQTT broker + last-value cache
 └── http_api.*         WebServer routes and JSON serialisation
 docs/
 ├── API.md                  integration guide for the controlling application
@@ -266,7 +322,7 @@ hardware/
 
 ---
 
-## 7. Beyond the basics
+## 8. Beyond the basics
 
 The controller supports far more than this bridge currently uses — DHW setpoints and cleaning
 schedule, high-temp cutoff, per-room floor limits / alarms / hysteresis, cooling mode, relay and
@@ -274,7 +330,7 @@ pump control, per-channel and total power, week schedules, change-flag polling a
 pairing. All of it is documented in [docs/WAVIN_REGISTER_MAP.md](docs/WAVIN_REGISTER_MAP.md); the
 `wavin_modbus` layer can already read and write any of it.
 
-## 8. Heat redistribution
+## 9. Heat redistribution
 
 `COOL MODE` can be used to move heat between rooms rather than to cool the house: put an
 over-warm room (solar gain, wood stove, south-facing) into cooling so its loop *absorbs* heat into

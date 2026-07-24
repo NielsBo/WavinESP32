@@ -83,6 +83,44 @@
 #define LED_ERROR_ON_MS         100
 
 // ---------------------------------------------------------------------------
+// Embedded MQTT broker
+// ---------------------------------------------------------------------------
+// Other devices publish to this bridge; the last payload per topic is cached
+// and served over REST (/mqtt). Requires the PicoMQTT library - set to 0 to
+// compile the whole feature out, including the dependency.
+//
+// This is a broker of convenience, not infrastructure: nothing is persisted,
+// there is no authentication on port 1883, and every client drops when the
+// bridge reboots or takes an OTA update. Do not put anything on it that the
+// heating depends on.
+#define MQTT_ENABLE          1
+#define MQTT_PORT            1883
+
+// Credentials. Watts Live can send a username/password but cannot do TLS, so
+// they cross the LAN in clear text - treat them as a misconfiguration guard,
+// not as security. Set to 0 to accept any client (the Watts default, with
+// both fields left empty). Values live in secrets.h.
+#define MQTT_REQUIRE_AUTH    0
+
+// Cache limits. Statically allocated, so the cost is paid at compile time:
+// MQTT_MAX_TOPICS * (MQTT_MAX_TOPIC_LEN + MQTT_MAX_PAYLOAD_LEN + ~16) bytes,
+// about 9 kB with the defaults below.
+//
+// Sized for Watts Live: it publishes to "watts/<serial>/measurement" (~35
+// chars) a JSON object of ~13 fields - positive_active_energy,
+// positive_active_power, voltage_l1..l3, current_l1..l3 and friends - which
+// runs to roughly 400 bytes. 512 leaves headroom; if you see `truncated`
+// climbing in /health, raise it.
+#define MQTT_MAX_TOPICS      16    // distinct topics kept; oldest is evicted
+#define MQTT_MAX_TOPIC_LEN   64    // longer topics are rejected outright
+#define MQTT_MAX_PAYLOAD_LEN 512   // longer payloads are stored truncated
+
+// Hard ceiling on a single MQTT message. PicoMQTT drops anything larger
+// before buffering it, which is what stops a hostile or broken publisher from
+// exhausting the heap. Must be >= MQTT_MAX_PAYLOAD_LEN.
+#define MQTT_MAX_MESSAGE_LEN 1024
+
+// ---------------------------------------------------------------------------
 // Network / HTTP
 // ---------------------------------------------------------------------------
 #define MDNS_NAME         "wavin"   // -> http://wavin.local

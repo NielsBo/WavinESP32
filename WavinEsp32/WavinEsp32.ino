@@ -20,6 +20,7 @@
 #include "http_api.h"
 #include "status_led.h"
 #include "relay_control.h"
+#include "mqtt_broker.h"
 
 static uint32_t lastWifiAttempt = 0;
 static uint32_t lastLoggedSweep = 0;
@@ -73,6 +74,9 @@ void setup() {
   httpBegin();
   Serial.printf("HTTP server on port %d\n", HTTP_PORT);
 
+  mqttBegin();
+  if (mqttEnabled()) Serial.printf("MQTT broker on port %d\n", MQTT_PORT);
+
   // First poll immediately so the API has data right away.
   int n = pollAllRooms();
   Serial.printf("Initial poll: %d room(s) found\n", n);
@@ -81,6 +85,7 @@ void setup() {
 void loop() {
   ArduinoOTA.handle();
   httpLoop();
+  mqttLoop();       // embedded broker: accepts clients, caches last values
   statusLedLoop();
   relayLoop();      // enforces relay override auto-restore deadlines
 
