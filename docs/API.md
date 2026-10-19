@@ -102,6 +102,11 @@ The whole request is validated before anything is written, so a `400` means noth
 setpoints are written first, then `mode`, then `cooling` — so `{"comfortTemp":22,"mode":"comfort"}`
 switches straight to the new temperature. Returns the **updated room object**.
 
+`mode` and the setpoints in that response are what the controller now holds. **`desired` can lag
+by a few seconds**: the controller recomputes it on its own, so the re-read right after a mode
+change sometimes still shows the old value. If you act on `desired`, read the room again a little
+later.
+
 A setpoint only matters while its mode is in force: `manualTemp` in `manual`, `comfortTemp` in
 `comfort`, and so on. Setting one does not change the mode.
 
@@ -120,9 +125,11 @@ A setpoint only matters while its mode is in force: `manualTemp` in `manual`, `c
 on its week schedule. `temp-standby` exists on the controller but the OEM documentation says not
 to use it, so the bridge does not offer it.
 
-`temp-comfort` / `temp-eco` override the week schedule without turning it off. The OEM
-documentation does not say when the controller ends them — most likely at the schedule's next
-switch. Check on your installation before relying on it.
+`temp-comfort` / `temp-eco` override the week schedule without turning it off. They do not use
+`durationMin` (it stays 0, nothing counts down), and the OEM documentation does not say when the
+controller ends them — most likely at the schedule's next comfort/eco switch. Not yet verified;
+check on your installation before relying on it, and remember the room is on its week schedule
+once it ends.
 
 #### Party and holiday
 
