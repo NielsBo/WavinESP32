@@ -106,10 +106,18 @@ static bool readRoom(int elementIndex, Room &r) {
     r.desired = decodeTemp(pd[PD_DESIRED]);
     r.manual  = decodeTemp(pd[PD_MANUAL]);
     r.config  = pd[PD_CONFIG];
+    r.comfort     = decodeTemp(pd[PD_COMFORT]);
+    r.eco         = decodeTemp(pd[PD_ECO]);
+    r.standby     = decodeTemp(pd[PD_STANDBY]);
+    r.holiday     = decodeTemp(pd[PD_HOLIDAY]);
+    r.party       = decodeTemp(pd[PD_PARTY]);
+    r.durationMin = (int)pd[PD_MODE_LEN] * 2;   // 2 min per LSB
   } else {
     r.desired = NAN;
     r.manual  = NAN;
     r.config  = 0;
+    r.comfort = r.eco = r.standby = r.holiday = r.party = NAN;
+    r.durationMin = 0;
   }
   return true;
 }
@@ -196,40 +204,88 @@ static void refreshRoom(int id) {
     }
 }
 
-bool setRoomManualTemp(int id, float celsius) {
+bool setRoomSetpoint(int id, uint8_t reg, float celsius) {
   const Room *r = roomById(id);
   if (!r) return false;
-  if (celsius < 0.0f)  celsius = 0.0f;         // OEM range guard
-  if (celsius > 30.0f) celsius = 30.0f;
+  if (reg != PD_MANUAL && reg != PD_COMFORT && reg != PD_ECO &&
+      reg != PD_STANDBY && reg != PD_HOLIDAY && reg != PD_PARTY)
+    return false;
+  if (celsius < SETPOINT_MIN) celsius = SETPOINT_MIN;   // OEM range guard
+  if (celsius > SETPOINT_MAX) celsius = SETPOINT_MAX;
 
   uint16_t raw = (uint16_t)lroundf(celsius * 10.0f);
-  if (!wavinWriteIndex(CAT_PACKED, PD_MANUAL, (uint8_t)r->syncGroup, raw))
+  if (!wavinWriteIndex(CAT_PACKED, reg, (uint8_t)r->syncGroup, raw))
     return false;
   refreshRoom(id);
   return true;
 }
 
+// Modes written as MODE[2:0] + SCHED ENA. No "temp-standby": the OEM map
+// marks SCHED ENA + STANDBY "do not use".
+static const struct { const char *name; uint16_t mode; bool sched; } MODES[] = {
+  { "manual",       MODE_MANUAL,  false },
+  { "standby",      MODE_STANDBY, false },
+  { "eco",          MODE_ECO,     false },
+  { "comfort",      MODE_COMFORT, false },
+  { "schedule",     MODE_MANUAL,  true  },
+  { "temp-eco",     MODE_ECO,     true  },
+  { "temp-comfort", MODE_COMFORT, true  },
+};
+
+bool modeSettable(const char *mode) {
+  if (!mode) return false;
+  if (!strcmp(mode, "party") || !strcmp(mode, "holiday")) return true;
+  for (const auto &e : MODES)
+    if (!strcmp(mode, e.name)) return true;
+  return false;
+}
+
 bool setRoomMode(int id, const char *mode) {
   const Room *r = roomById(id);
   if (!r || !mode) return false;
+  if (!strcmp(mode, "party"))   return setRoomParty(id, 0);
+  if (!strcmp(mode, "holiday")) return setRoomHoliday(id, 0);
 
-  uint16_t m;
-  bool sched = false;
-  if      (!strcmp(mode, "manual"))   m = MODE_MANUAL;
-  else if (!strcmp(mode, "standby"))  m = MODE_STANDBY;
-  else if (!strcmp(mode, "eco"))      m = MODE_ECO;
-  else if (!strcmp(mode, "comfort"))  m = MODE_COMFORT;
-  else if (!strcmp(mode, "schedule")) { m = MODE_MANUAL; sched = true; }
-  else return false;
+  for (const auto &e : MODES) {
+    if (strcmp(mode, e.name)) continue;
+    uint16_t data = e.mode | (e.sched ? PD_CFG_SCHED_ENA : 0);
+    // Masked write: mask bit 1 = keep. Change only MODE[2:0] + SCHED ENA (bits 3..0),
+    // leaving lock/floor/cool bits untouched and avoiding a read-modify-write race.
+    if (!wavinWriteIndexMasked(CAT_PACKED, PD_CONFIG, (uint8_t)r->syncGroup,
+                               data, 0xFFF0))
+      return false;
+    refreshRoom(id);
+    return true;
+  }
+  return false;
+}
 
-  uint16_t data = m | (sched ? PD_CFG_SCHED_ENA : 0);
-  // Masked write: mask bit 1 = keep. Change only MODE[2:0] + SCHED ENA (bits 3..0),
-  // leaving lock/floor/cool bits untouched and avoiding a read-modify-write race.
-  if (!wavinWriteIndexMasked(CAT_PACKED, PD_CONFIG, (uint8_t)r->syncGroup,
-                             data, 0xFFF0))
+// Shared by party and holiday: optional duration, then the mode switch.
+static bool setTimedMode(int id, uint16_t mode, int durationMin) {
+  const Room *r = roomById(id);
+  if (!r) return false;
+  uint8_t page = (uint8_t)r->syncGroup;
+
+  // Duration first: the controller starts the countdown when MODE changes.
+  if (durationMin > 0 &&
+      !wavinWriteIndex(CAT_PACKED, PD_MODE_LEN, page, (uint16_t)((durationMin + 1) / 2)))
     return false;
+
+  // Mask 0xFFF8: write MODE[2:0] only. Unlike setRoomMode(), SCHED ENA is kept,
+  // which is what selects the on-manual vs with-schedule variant.
+  bool ok = wavinWriteIndexMasked(CAT_PACKED, PD_CONFIG, page, mode, 0xFFF8);
   refreshRoom(id);
-  return true;
+  return ok;
+}
+
+bool setRoomParty(int id, int durationMin) {
+  if (durationMin > PARTY_DURATION_MAX) durationMin = PARTY_DURATION_MAX;
+  return setTimedMode(id, MODE_PARTY, durationMin);
+}
+
+bool setRoomHoliday(int id, int durationMin) {
+  if (durationMin > HOLIDAY_DURATION_MAX) durationMin = HOLIDAY_DURATION_MAX;
+  return setTimedMode(id, MODE_HOLIDAY, durationMin);
 }
 
 bool setRoomCooling(int id, bool on) {

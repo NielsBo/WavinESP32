@@ -169,6 +169,17 @@ curl -X POST http://wavin.local/rooms/1 \
      -H "X-Api-Token: your-token" \
      -H "Content-Type: application/json" \
      -d '{"mode":"manual"}'      # manual | standby | eco | comfort | schedule
+                                 # temp-eco | temp-comfort | party | holiday
+
+curl -X POST http://wavin.local/rooms/1 \
+     -H "X-Api-Token: your-token" \
+     -H "Content-Type: application/json" \
+     -d '{"comfortTemp":22,"ecoTemp":19}'   # also standbyTemp, holidayTemp, partyTemp
+
+curl -X POST http://wavin.local/rooms/1 \
+     -H "X-Api-Token: your-token" \
+     -H "Content-Type: application/json" \
+     -d '{"mode":"party","partyTemp":24,"durationMin":180}'   # 24 °C for 3 h
 
 curl -X POST http://wavin.local/rooms/1 \
      -H "X-Api-Token: your-token" \
@@ -189,6 +200,11 @@ room, `409` Modbus write failed.
 
 Mode changes use the OEM **masked write (0x45)** so only `MODE[2:0]` + `SCHED ENA` are touched —
 the lock/floor/cooling bits are preserved and there is no read-modify-write race.
+
+**Party** and **holiday** write `MODE[2:0]` only and keep `SCHED ENA`, so a scheduled room goes
+to the with-schedule variant and returns to its schedule afterwards. The controller runs the timer
+itself. `partyTemp`, `holidayTemp` and `durationMin` are optional and written before the mode
+switch; see [docs/API.md](docs/API.md#party-and-holiday).
 
 **Relays** — one drives the circulation pump, one signals the heat source:
 

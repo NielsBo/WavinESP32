@@ -113,8 +113,8 @@ Room-level setpoints & mode, common to all elements in a channel/room. Temps 0.1
 | 0x02 | ECO TEMPERATURE | r/w | |
 | 0x03 | HOLIDAY TEMPERATURE | r/w | override temp in Holiday |
 | 0x04 | STANDBY TEMPERATURE | r/w | override temp in Standby |
-| 0x05 | PARTY TEMPERATURE | r/w | increment for Party mode |
-| 0x06 | MODE LENGTH | r/w | override duration, **2 min/LSB** |
+| 0x05 | PARTY TEMPERATURE | r/w | OEM doc says "increment"; **measured: absolute** setpoint in Party mode |
+| 0x06 | MODE LENGTH | r/w | override duration, **2 min/LSB**; **measured: counts down** during Party |
 | 0x07 | **CONFIGURATION** | r/w | mode + flags, see below |
 | 0x08 | MINIMUM TEMPERATURE | r/w | lowest user-settable |
 | 0x09 | MAXIMUM TEMPERATURE | r/w | highest user-settable |

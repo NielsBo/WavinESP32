@@ -41,6 +41,12 @@ static void roomToJson(const Room *r, JsonObject o) {
   addFloat(o, "current", r->current);
   addFloat(o, "desired", r->desired);
   addFloat(o, "manual",  r->manual);
+  addFloat(o, "comfort", r->comfort);
+  addFloat(o, "eco",     r->eco);
+  addFloat(o, "standby", r->standby);
+  addFloat(o, "holiday", r->holiday);
+  addFloat(o, "party",   r->party);
+  o["durationMin"] = r->durationMin;
   addFloat(o, "floor",   r->floorTemp);
   o["mode"]       = modeName(r->config);
   o["output"]     = r->output;
@@ -236,7 +242,7 @@ static void handleMqttPost() {
 }
 
 static void handleRooms() {
-  JSON_DOC(doc, 4096);
+  JSON_DOC(doc, 6144);   // v6 only: ~450 bytes per room x ELEMENT_COUNT
   JsonArray arr = doc.to<JsonArray>();
   for (int i = 0; i < roomCount(); i++) {
     const Room *r = roomAt(i);
@@ -254,7 +260,7 @@ static void handleRooms() {
 }
 
 static void sendRoom(const Room *r) {
-  JSON_DOC(doc, 512);
+  JSON_DOC(doc, 768);
   JsonObject o = doc.to<JsonObject>();
   roomToJson(r, o);
   String out;
@@ -306,6 +312,16 @@ static bool authorized() {
   return server.header("X-Api-Token") == String(API_TOKEN);
 }
 
+// Writable room setpoints, by request key.
+static const struct { const char *key; uint8_t reg; } SETPOINTS[] = {
+  { "manualTemp",  PD_MANUAL  },
+  { "comfortTemp", PD_COMFORT },
+  { "ecoTemp",     PD_ECO     },
+  { "standbyTemp", PD_STANDBY },
+  { "holidayTemp", PD_HOLIDAY },
+  { "partyTemp",   PD_PARTY   },
+};
+
 // Routes /rooms/<id> for GET and POST (WebServer has no path params).
 static void handleNotFound() {
   String uri = server.uri();
@@ -324,26 +340,59 @@ static void handleNotFound() {
       DeserializationError err = deserializeJson(body, server.arg("plain"));
       if (err) { sendError(400, "bad_json", err.c_str()); return; }
 
-      if (!body["manualTemp"].isNull()) {
-        float t = body["manualTemp"].as<float>();
-        if (t < 0.0f || t > 30.0f) { sendError(400, "out_of_range", "manualTemp must be 0..30"); return; }
-        if (!setRoomManualTemp(id, t)) { sendError(409, "busy", "modbus write failed"); return; }
-        sendRoom(roomById(id));
+      // Any combination of the keys below may be sent. Everything is
+      // validated before the first write, so a bad request changes nothing;
+      // then setpoints are written, then the mode, then cooling.
+      bool any = false;
+      for (const auto &sp : SETPOINTS) {
+        if (body[sp.key].isNull()) continue;
+        float t = body[sp.key].as<float>();
+        if (!(t >= SETPOINT_MIN && t <= SETPOINT_MAX)) {
+          sendError(400, "out_of_range", "setpoints must be 0..30"); return;
+        }
+        any = true;
+      }
+
+      const char *m = body["mode"];
+      bool hasMode = !body["mode"].isNull();
+      if (hasMode && !modeSettable(m)) { sendError(400, "bad_mode", "unsupported mode"); return; }
+      bool party   = hasMode && !strcmp(m, "party");
+      bool holiday = hasMode && !strcmp(m, "holiday");
+
+      int mins = 0;
+      if (!body["durationMin"].isNull()) {
+        if (!party && !holiday) { sendError(400, "bad_request", "durationMin needs mode party or holiday"); return; }
+        mins = body["durationMin"].as<int>();
+        int maxMins = party ? PARTY_DURATION_MAX : HOLIDAY_DURATION_MAX;
+        if (mins < 2 || mins > maxMins) {
+          sendError(400, "out_of_range", party ? "durationMin must be 2..1440 for party"
+                                               : "durationMin must be 2..131070 for holiday");
+          return;
+        }
+      }
+      bool hasCooling = !body["cooling"].isNull();
+      if (!any && !hasMode && !hasCooling) {
+        sendError(400, "bad_request", "expected a setpoint, mode or cooling");
         return;
       }
-      if (!body["mode"].isNull()) {
-        const char *m = body["mode"];
-        if (!setRoomMode(id, m)) { sendError(400, "bad_mode", "unsupported mode or write failed"); return; }
-        sendRoom(roomById(id));
-        return;
+
+      for (const auto &sp : SETPOINTS) {
+        if (body[sp.key].isNull()) continue;
+        if (!setRoomSetpoint(id, sp.reg, body[sp.key].as<float>())) {
+          sendError(409, "busy", "modbus write failed"); return;
+        }
       }
-      if (!body["cooling"].isNull()) {
-        bool on = body["cooling"].as<bool>();
-        if (!setRoomCooling(id, on)) { sendError(409, "busy", "modbus write failed"); return; }
-        sendRoom(roomById(id));
-        return;
+      if (hasMode) {
+        // partyTemp / holidayTemp, if sent, were written with the setpoints above.
+        bool ok = party   ? setRoomParty(id, mins)
+                : holiday ? setRoomHoliday(id, mins)
+                :           setRoomMode(id, m);
+        if (!ok) { sendError(409, "busy", "modbus write failed"); return; }
       }
-      sendError(400, "bad_request", "expected manualTemp, mode or cooling");
+      if (hasCooling && !setRoomCooling(id, body["cooling"].as<bool>())) {
+        sendError(409, "busy", "modbus write failed"); return;
+      }
+      sendRoom(roomById(id));
       return;
     }
   }

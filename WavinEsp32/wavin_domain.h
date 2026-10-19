@@ -101,6 +101,12 @@ struct Room {
   float    dewPoint;      // NAN if unknown
   float    desired;       // currently active setpoint, degC
   float    manual;        // manual-mode setpoint, degC
+  float    comfort;       // comfort-mode setpoint, degC
+  float    eco;           // eco-mode setpoint, degC
+  float    standby;       // standby-mode setpoint, degC
+  float    holiday;       // holiday-mode setpoint, degC
+  float    party;         // party-mode setpoint, degC
+  int      durationMin;   // MODE LENGTH: party/holiday duration, minutes
   int      humidity;      // %RH, -1 if unknown
   int      battery;       // %, -1 if unknown
   float    rssiElement;   // dBm
@@ -127,9 +133,34 @@ const Room*  roomAt(int idx);             // 0..roomCount()-1
 const Room*  roomById(int id);            // nullptr if unknown
 uint32_t     lastPollAt();                // millis() when the last sweep completed
 
-// Control. Both re-read the room afterwards so the cache reflects reality.
-bool setRoomManualTemp(int id, float celsius);      // clamped 0..30
-bool setRoomMode(int id, const char *mode);         // "manual" | "standby" | "eco" | "comfort"
+// Control. All re-read the room afterwards so the cache reflects reality.
+
+// Writes one of the room's setpoints: PD_MANUAL, PD_COMFORT, PD_ECO,
+// PD_STANDBY, PD_HOLIDAY or PD_PARTY. Clamped to SETPOINT_MIN..SETPOINT_MAX.
+#define SETPOINT_MIN  0.0f
+#define SETPOINT_MAX 30.0f
+bool setRoomSetpoint(int id, uint8_t reg, float celsius);
+
+// "manual" | "standby" | "eco" | "comfort" | "schedule" | "temp-eco" |
+// "temp-comfort" | "party" | "holiday". The temp- variants override the week
+// schedule without disabling it. party/holiday go through the setters below
+// with the controller's stored duration.
+bool setRoomMode(int id, const char *mode);
+bool modeSettable(const char *mode);   // true if setRoomMode() accepts the name
+
+// PARTY and HOLIDAY hold the room at its party / holiday setpoint (write those
+// with setRoomSetpoint first) for `durationMin`, after which the controller
+// falls back on its own. SCHED ENA is left as it is, so a room on its week
+// schedule goes to the with-schedule variant and returns to the schedule
+// afterwards. Pass 0 to keep the duration already stored on the controller;
+// it is one register shared by both modes.
+//
+// The OEM map calls the party register an "increment". It is not: measured on
+// a real AHC9000, DESIRED becomes the register value itself.
+#define PARTY_DURATION_MAX    (24 * 60)        // minutes
+#define HOLIDAY_DURATION_MAX  (0xFFFF * 2)     // minutes, register limit (~91 days)
+bool setRoomParty(int id, int durationMin);
+bool setRoomHoliday(int id, int durationMin);
 
 // COOL MODE inverts the channel's control loop: the actuator opens when the
 // room is ABOVE setpoint instead of below. Per room, written with a masked

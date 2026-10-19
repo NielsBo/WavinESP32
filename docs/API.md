@@ -17,9 +17,11 @@ server on the LAN that fronts a Wavin AHC9000 underfloor-heating controller over
 | **Room** | A thermostat and the floor loop(s) it controls. Identified by `id` (1-based, stable). |
 | `current` | Measured air temperature. |
 | `desired` | The setpoint the controller is actually working to (read-only on the device). |
-| `manual` | The manual-mode setpoint — **this is what you write**. |
+| `manual` | The manual-mode setpoint — **this is what you usually write**. |
+| `comfort` / `eco` / `standby` / `holiday` / `party` | The setpoints those modes use. All writable. |
 | `output` | `true` when the room is calling for heat (its actuator is open). |
-| `mode` | Which setpoint is in force: `manual`, `eco`, `comfort`, `standby`, `schedule`, … |
+| `mode` | Which setpoint is in force — see [Modes](#modes). |
+| `durationMin` | How long a party or holiday lasts — see [Party and holiday](#party-and-holiday). |
 | `cooling` | The room's control loop is **inverted** (opens above setpoint). |
 | **Relay** | A controller output. Typically one drives the **circulation pump**, one signals the **heat source**. `id` is 1-based. |
 
@@ -71,7 +73,9 @@ it"*.
 
 ```json
 [ { "id": 1, "syncGroup": 3,
-    "current": 22.4, "desired": 21.0, "manual": 21.0, "floor": 23.1,
+    "current": 22.4, "desired": 21.0, "floor": 23.1,
+    "manual": 21.0, "comfort": 22.0, "eco": 19.0, "standby": 10.0, "holiday": 12.0,
+    "party": 24.0, "durationMin": 0,
     "mode": "manual", "output": true,
     "alive": true, "lowBattery": false,
     "humidity": 41, "battery": 80,
@@ -79,21 +83,70 @@ it"*.
 ```
 
 Unknown sensor values are **`null`**, never `0` — always null-check `floor`, `humidity`,
-`desired`. Temperatures are °C rounded to 1 decimal. `alive: false` means that thermostat has not
+`desired` and the setpoints. Temperatures are °C rounded to 1 decimal. `alive: false` means that thermostat has not
 reported in ~25 minutes: its `current` is stale, so **skip it in control decisions**.
 
 ### `POST /rooms/{id}`
 
-Requires `X-Api-Token`. Send exactly one of:
+Requires `X-Api-Token`. Send any combination of:
 
 ```jsonc
-{ "manualTemp": 21.5 }                  // 0–30 °C
-{ "mode": "manual" }                    // manual|standby|eco|comfort|schedule
-{ "cooling": true }                     // invert the loop for this room
+{ "manualTemp": 21.5,                   // setpoints, 0–30 °C each
+  "comfortTemp": 22, "ecoTemp": 19, "standbyTemp": 10, "holidayTemp": 12, "partyTemp": 24,
+  "mode": "comfort",                    // see Modes below
+  "durationMin": 180,                   // only with mode party / holiday
+  "cooling": true }                     // invert the loop for this room
 ```
 
-Returns the **updated room object**. Note `manualTemp` only takes effect when the room is in
-`manual` mode — if it is on a schedule, set `mode` first.
+The whole request is validated before anything is written, so a `400` means nothing changed. Then
+setpoints are written first, then `mode`, then `cooling` — so `{"comfortTemp":22,"mode":"comfort"}`
+switches straight to the new temperature. Returns the **updated room object**.
+
+A setpoint only matters while its mode is in force: `manualTemp` in `manual`, `comfortTemp` in
+`comfort`, and so on. Setting one does not change the mode.
+
+#### Modes
+
+| `mode` | Setpoint used | Week schedule | Ends |
+|---|---|---|---|
+| `manual` | `manual` | off | — |
+| `comfort` / `eco` / `standby` | that mode's | off | — (permanent) |
+| `schedule` | comfort/eco from the week schedule | on | — |
+| `temp-comfort` / `temp-eco` | that mode's | stays on | controller-defined, see below |
+| `party` | `party` | kept as it was | after `durationMin` |
+| `holiday` | `holiday` | kept as it was | after `durationMin` |
+
+`GET` can also report `party-schedule` and `holiday-schedule` — the same modes, on a room that is
+on its week schedule. `temp-standby` exists on the controller but the OEM documentation says not
+to use it, so the bridge does not offer it.
+
+`temp-comfort` / `temp-eco` override the week schedule without turning it off. The OEM
+documentation does not say when the controller ends them — most likely at the schedule's next
+switch. Check on your installation before relying on it.
+
+#### Party and holiday
+
+```jsonc
+{ "mode": "party" }                                            // stored temp + duration
+{ "mode": "party", "partyTemp": 24, "durationMin": 180 }        // 24 °C for 3 h
+{ "mode": "holiday", "holidayTemp": 12, "durationMin": 10080 }  // 12 °C for a week
+```
+
+Both hold the room at their own setpoint, `party` or `holiday`. **`partyTemp` is an absolute
+temperature**, not an increment. The OEM register map calls it an increment, but on a real
+AHC9000 `desired` becomes the stored value itself. `durationMin` is 2–1440 for party and 2–131070 (~91 days) for holiday, stored in 2-minute steps,
+so odd values round up. Everything is optional; anything you leave out keeps what the controller
+already has, which `GET /rooms/{id}` shows. The **controller runs the timer itself** and falls
+back when it ends, so it does not need your client to stay up.
+
+Whether the room is on its week schedule is preserved: a room in `schedule` goes to
+`party-schedule` / `holiday-schedule` and returns to its schedule afterwards; a `manual` room
+returns to manual. To end early, set the `mode` you want back.
+
+Party and holiday share **one duration register** on the controller. Starting one changes
+`durationMin` for the other, and so does setting either at the panel. During an override it
+**counts down to 0**, so `GET` shows the time remaining, and the room drops back to its previous
+mode when it gets there (measured on a real AHC9000).
 
 ### `GET /relays` · `GET /relays/{id}` · `POST /relays/{id}`
 
@@ -281,7 +334,7 @@ TLS, no rate limiting, no lockout.
 ```
 GET  /health                                     link + device status
 GET  /rooms                 GET  /rooms/{id}     room state (cached)
-POST /rooms/{id}            {manualTemp|mode|cooling}      auth
+POST /rooms/{id}            {*Temp, mode, durationMin, cooling}   auth
 GET  /relays                GET  /relays/{id}    relay state
 POST /relays/{id}           {enabled, restoreAfterS}       auth
 GET  /mqtt                  GET  /mqtt?topic=a/b cached MQTT last values
